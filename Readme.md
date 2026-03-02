@@ -246,3 +246,8 @@ For issues and questions, please open an issue on GitHub.
 ---
 
 Built with ♟️ by passionate chess developers
+
+
+
+
+      
