@@ -14,6 +14,8 @@ interface SquareProps {
   isSelected: boolean;
   isValidMove: boolean;
   isCapture: boolean;
+  isIllegalMove?: boolean;
+  isIllegalCapture?: boolean;
   isInCheck?: boolean;
   onClick: (row: number, col: number) => void;
   row: number;
@@ -30,6 +32,8 @@ const Square: React.FC<SquareProps> = ({
   isSelected, 
   isValidMove, 
   isCapture,
+  isIllegalMove = false,
+  isIllegalCapture = false,
   isInCheck = false,
   onClick, 
   row, 
@@ -61,6 +65,14 @@ const Square: React.FC<SquareProps> = ({
     
     if (isCapture || (isValidMove && piece)) {
       classes += 'capture-move ';
+    }
+    
+    if (isIllegalMove) {
+      classes += 'illegal-move ';
+    }
+    
+    if (isIllegalCapture) {
+      classes += 'illegal-capture ';
     }
     
     if (isInCheck || isCheck) {

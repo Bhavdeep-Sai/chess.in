@@ -13,6 +13,13 @@ const showToast = {
       position: 'top-center',
     });
   },
+  info: (message: string) => {
+    toast(message, {
+      duration: 3000,
+      position: 'top-center',
+      icon: 'ℹ️',
+    });
+  },
   loading: (message: string) => {
     return toast.loading(message, {
       position: 'top-center',

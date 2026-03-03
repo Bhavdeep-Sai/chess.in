@@ -28,6 +28,7 @@ export interface MoveWithType {
   row: number;
   col: number;
   type: 'normal' | 'capture' | 'castling';
+  isCapture: boolean;
 }
 
 export interface CastlingRights {
@@ -57,7 +58,7 @@ export const initializeBoard = (): Board => {
   return board;
 };
 
-// Get legal moves with types (normal, capture, castling)
+// Get legal moves with types (normal, capture, castling) - Only moves that don't leave king in check
 export const getLegalMovesWithTypes = (
   board: Board,
   row: number,
@@ -65,9 +66,21 @@ export const getLegalMovesWithTypes = (
   piece: Piece,
   castlingRights?: CastlingRights
 ): MoveWithType[] => {
-  // This would include the full chess logic
-  // For brevity, returning empty array - full implementation needed
-  return [];
+  // Import from chessLogic
+  const { getLegalMoves } = require('@/lib/utils/chessLogic');
+  
+  // Get only legal moves (those that don't leave king in check)
+  const legalMoves = getLegalMoves(board, row, col, piece, castlingRights);
+  
+  return legalMoves.map(([moveRow, moveCol]) => {
+    const isCapture = board[moveRow][moveCol] !== null;
+    return {
+      row: moveRow,
+      col: moveCol,
+      type: isCapture ? 'capture' : 'normal',
+      isCapture
+    };
+  });
 };
 
 // Get chess piece Unicode symbol

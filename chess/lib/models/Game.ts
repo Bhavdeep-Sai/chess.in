@@ -55,6 +55,11 @@ export interface IDrawOffer {
   timestamp: Date | null;
 }
 
+export interface IRematchRequest {
+  white: boolean;
+  black: boolean;
+}
+
 export interface IGame extends Document {
   roomId: string;
   name: string | null;
@@ -76,6 +81,7 @@ export interface IGame extends Document {
   roomType: 'public' | 'private';
   chat: IChatMessage[];
   drawOffer: IDrawOffer;
+  rematchRequest: IRematchRequest | null;
   createdBy: mongoose.Types.ObjectId | null;
   startedAt?: Date;
   endedAt?: Date;
@@ -286,6 +292,16 @@ const gameSchema = new Schema<IGame>({
     timestamp: {
       type: Date,
       default: null
+    }
+  },
+  rematchRequest: {
+    white: {
+      type: Boolean,
+      default: false
+    },
+    black: {
+      type: Boolean,
+      default: false
     }
   },
   createdBy: {

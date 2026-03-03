@@ -74,6 +74,11 @@ const Results: React.FC<ResultsProps> = ({
     
     const { winner, reason } = gameState.result;
     
+    console.log('📊 Results - playerColor:', playerColor);
+    console.log('📊 Results - winner:', winner);
+    console.log('📊 Results - reason:', reason);
+    console.log('📊 Results - gameState.result:', gameState.result);
+    
     if (winner === 'draw') {
       return {
         mainText: 'Draw',
@@ -104,7 +109,7 @@ const Results: React.FC<ResultsProps> = ({
     } else {
       return {
         mainText: `${winnerName} Wins`,
-        subText: 'Defeat',
+        subText: reasonText || 'Defeat',
         isWinner: false,
         color: 'text-red-500'
       };

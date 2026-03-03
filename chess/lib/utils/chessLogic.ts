@@ -472,3 +472,27 @@ export const isStalemate = (board: Board, color: ColorType, castlingRights: Cast
 export const isCastlingMove = (piece: Piece, from: { row: number; col: number }, to: { row: number; col: number }): boolean => {
   return piece.type === PIECES.KING && Math.abs(to.col - from.col) === 2;
 };
+
+// Get legal moves that don't leave the king in check
+export const getLegalMoves = (
+  board: Board,
+  row: number,
+  col: number,
+  piece: Piece,
+  castlingRights: CastlingRights | null = null
+): [number, number][] => {
+  const possibleMoves = getPossibleMoves(board, row, col, piece, castlingRights);
+  const legalMoves: [number, number][] = [];
+  
+  for (const [toRow, toCol] of possibleMoves) {
+    // Simulate the move
+    const { newBoard } = makeMove(board, { row, col }, { row: toRow, col: toCol });
+    
+    // Check if the king is still in check after this move
+    if (!isInCheck(newBoard, piece.color)) {
+      legalMoves.push([toRow, toCol]);
+    }
+  }
+  
+  return legalMoves;
+};

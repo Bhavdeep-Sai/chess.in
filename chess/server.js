@@ -99,6 +99,9 @@ app.prepare().then(async () => {
     io.emit('user_count', count);
   };
 
+  // Track pending promotions per socket
+  const pendingPromotions = new Map();
+
   // Quick Match Algorithm - Find or create a waiting room
   const findOrCreateQuickMatchRoom = async (socket, data) => {
     try {
@@ -344,6 +347,12 @@ app.prepare().then(async () => {
     });
 
     socket.on('disconnect', async () => {
+      // Clean up any pending promotions for this socket
+      if (pendingPromotions.has(socket.id)) {
+        console.log('🧹 Cleaning up pending promotion for disconnected socket:', socket.id);
+        pendingPromotions.delete(socket.id);
+      }
+      
       // Get all rooms this socket was in
       const rooms = Array.from(socket.rooms);
       
@@ -529,6 +538,13 @@ app.prepare().then(async () => {
       try {
         console.log('📥 Server received move:', data);
         
+        // Check if there's a pending promotion for this socket
+        if (pendingPromotions.has(socket.id)) {
+          console.log('⚠️ Cannot make move - pending promotion exists');
+          socket.emit('error', { message: 'Please complete the pending pawn promotion first' });
+          return;
+        }
+        
         const game = await Game.findOne({ roomId: data.roomId });
         if (!game) {
           console.log('❌ Game not found:', data.roomId);
@@ -540,13 +556,61 @@ app.prepare().then(async () => {
         // Initialize chess.js instance with current FEN or starting position
         const chess = new Chess(game.board || undefined);
         
+        // Check if this move requires promotion
+        const fromSquare = data.from;
+        const toSquare = data.to;
+        const piece = chess.get(fromSquare);
+        
+        // Detect if pawn is moving to promotion rank
+        const isPromotion = piece && 
+                           piece.type === 'p' && 
+                           ((piece.color === 'w' && toSquare[1] === '8') || 
+                            (piece.color === 'b' && toSquare[1] === '1'));
+        
+        if (isPromotion && !data.promotion) {
+          // Ask player for promotion piece
+          console.log('🎯 Promotion required for:', fromSquare, '->', toSquare);
+          console.log('🎯 Socket ID:', socket.id);
+          
+          // Store pending promotion to prevent duplicate requests
+          const promotionData = {
+            roomId: data.roomId,
+            from: fromSquare,
+            to: toSquare,
+            color: piece.color === 'w' ? 'white' : 'black',
+            timestamp: Date.now()
+          };
+          pendingPromotions.set(socket.id, promotionData);
+          console.log('🎯 Stored pending promotion:', promotionData);
+          console.log('🎯 Map now has', pendingPromotions.size, 'entries');
+          
+          socket.emit('promotion_required', {
+            from: fromSquare,
+            to: toSquare,
+            color: piece.color === 'w' ? 'white' : 'black'
+          });
+          return;
+        }
+        
+        // Convert promotion piece name to chess.js notation if needed
+        let promotionPiece = data.promotion;
+        if (promotionPiece) {
+          const promotionMap = {
+            'queen': 'q',
+            'rook': 'r',
+            'bishop': 'b',
+            'knight': 'n'
+          };
+          promotionPiece = promotionMap[promotionPiece] || promotionPiece;
+        }
+        
         // Validate move
         try {
           console.log('🔍 Attempting move:', data.from, '->', data.to);
           const move = chess.move({
             from: data.from,
             to: data.to,
-            promotion: data.promotion || 'q'
+            promotion: promotionPiece || 'q'
           });
           
           if (!move) {
@@ -638,6 +702,153 @@ app.prepare().then(async () => {
       }
     });
 
+    // Handle pawn promotion
+    socket.on('promote_pawn', async (data) => {
+      try {
+        console.log('👑 Pawn promotion received:', data);
+        console.log('👑 Socket ID:', socket.id);
+        console.log('👑 Pending promotions map size:', pendingPromotions.size);
+        console.log('👑 All pending promotion keys:', Array.from(pendingPromotions.keys()));
+        
+        // Convert piece name to chess.js notation FIRST
+        const promotionMap = {
+          'queen': 'q',
+          'rook': 'r',
+          'bishop': 'b',
+          'knight': 'n'
+        };
+        const promotionPiece = promotionMap[data.promotion] || data.promotion;
+        
+        console.log('🔄 Converting promotion:', data.promotion, '->', promotionPiece);
+        
+        // Check and clear pending promotion if it exists
+        const pendingPromotion = pendingPromotions.get(socket.id);
+        if (pendingPromotion) {
+          console.log('✓ Found pending promotion:', pendingPromotion);
+          // Verify the move matches (optional - for debugging)
+          if (pendingPromotion.from !== data.from || pendingPromotion.to !== data.to) {
+            console.log('⚠️ Promotion data mismatch (proceeding anyway):', { 
+              pending: pendingPromotion, 
+              received: { from: data.from, to: data.to } 
+            });
+          }
+          pendingPromotions.delete(socket.id);
+        } else {
+          console.log('⚠️ No pending promotion found (proceeding anyway)');
+        }
+        
+        // Process the move
+        const game = await Game.findOne({ roomId: data.roomId });
+        if (!game) {
+          console.log('❌ Game not found:', data.roomId);
+          socket.emit('error', { message: 'Game not found' });
+          return;
+        }
+        
+        console.log('🎲 Current board state:', game.board);
+        const chess = new Chess(game.board || undefined);
+        
+        // Debug: check what's at the from and to squares
+        const fromPiece = chess.get(data.from);
+        const toPiece = chess.get(data.to);
+        console.log('🔍 From square', data.from, ':', fromPiece);
+        console.log('🔍 To square', data.to, ':', toPiece);
+        console.log('🔍 Current turn:', chess.turn());
+        
+        // Try to make the move
+        let move;
+        try {
+          move = chess.move({
+            from: data.from,
+            to: data.to,
+            promotion: promotionPiece
+          });
+        } catch (moveError) {
+          console.error('❌ chess.js move error:', moveError.message);
+          console.error('❌ Move details:', { from: data.from, to: data.to, promotion: promotionPiece });
+          socket.emit('invalid_move', { message: 'Invalid promotion: ' + moveError.message });
+          return;
+        }
+        
+        if (!move) {
+          console.log('❌ chess.js rejected the move - returned null');
+          socket.emit('invalid_move', { message: 'Invalid promotion move' });
+          return;
+        }
+        
+        console.log('✅ Promotion successful:', move.san);
+        
+        // Update game state
+        game.board = chess.fen();
+        game.currentPlayer = chess.turn() === 'w' ? 'white' : 'black';
+        
+        game.moves.push({
+          from: data.from,
+          to: data.to,
+          piece: move.piece,
+          captured: move.captured,
+          notation: move.san,
+          moveTime: 0,
+          timestamp: new Date()
+        });
+        
+        // Check game status
+        if (chess.isCheckmate()) {
+          game.gameStatus = 'finished';
+          game.result.winner = chess.turn() === 'w' ? 'black' : 'white';
+          game.result.reason = 'checkmate';
+          game.endedAt = new Date();
+        } else if (chess.isDraw()) {
+          game.gameStatus = 'finished';
+          game.result.winner = 'draw';
+          game.result.reason = chess.isStalemate() ? 'stalemate' : 'draw';
+          game.endedAt = new Date();
+        }
+        
+        await game.save();
+        
+        // Broadcast the promotion move
+        io.to(data.roomId).emit('move_made', {
+          move: {
+            from: data.from,
+            to: data.to,
+            piece: move.piece,
+            captured: move.captured,
+            promotion: move.promotion,
+            notation: move.san
+          },
+          fen: chess.fen(),
+          currentPlayer: game.currentPlayer,
+          isCheck: chess.isCheck(),
+          isCheckmate: chess.isCheckmate(),
+          isDraw: chess.isDraw(),
+          gameStatus: game.gameStatus
+        });
+        
+        if (game.gameStatus === 'finished') {
+          io.to(data.roomId).emit('game_ended', {
+            winner: game.result.winner,
+            reason: game.result.reason,
+            game: game
+          });
+        }
+        
+      } catch (error) {
+        console.error('❌ Error promoting pawn:', error);
+        console.error('❌ Error stack:', error.stack);
+        console.error('❌ Promotion data:', data);
+        socket.emit('error', { message: 'Failed to promote pawn: ' + error.message });
+      }
+    });
+
+    // Handle promotion cancellation
+    socket.on('cancel_promotion', (data) => {
+      if (pendingPromotions.has(socket.id)) {
+        console.log('🚫 Player cancelled promotion');
+        pendingPromotions.delete(socket.id);
+      }
+    });
+
     socket.on('ready', async (data) => {
       try {
         console.log('Player ready:', data);
@@ -716,21 +927,42 @@ app.prepare().then(async () => {
         const resignedPlayer = game.players.white?.socketId === socket.id ? 'white' : 'black';
         const winner = resignedPlayer === 'white' ? 'black' : 'white';
 
+        console.log('🏳️ Resigned player:', resignedPlayer);
+        console.log('🏆 Winner:', winner);
+        console.log('📋 Socket ID:', socket.id);
+        console.log('📋 White socketId:', game.players.white?.socketId);
+        console.log('📋 Black socketId:', game.players.black?.socketId);
+
         game.gameStatus = 'finished';
-        game.result = {
-          winner: winner,
-          reason: 'resignation',
-          endedAt: new Date()
-        };
+        game.result.winner = winner;
+        game.result.reason = 'resignation';
+        game.result.method = 'resignation'; // Additional field for clarity
+        game.endedAt = new Date();
         
         await game.save();
 
-        // Emit game ended to both players
+        console.log('💾 Game saved with result:', game.result);
+        console.log('💾 Game status after save:', game.gameStatus);
+
+        // Emit game ended to both players with complete result object
+        const resultData = {
+          winner: winner,
+          reason: 'resignation',
+          method: 'resignation'
+        };
+
+        console.log('📤 Emitting game_ended event with data:', {
+          winner: winner,
+          reason: 'resignation',
+          gameStatus: game.gameStatus
+        });
+
         io.to(data.roomId).emit('game_ended', {
           winner: winner,
           reason: 'resignation',
-          result: game.result,
-          game: game
+          result: resultData,
+          game: game.toObject(), // Convert to plain object to ensure all fields are sent
+          username: socket.username
         });
 
         // Broadcast lobby update
@@ -739,7 +971,7 @@ app.prepare().then(async () => {
           game: game
         });
 
-        console.log('✅ Game ended by resignation');
+        console.log('✅ Game ended by resignation - Winner:', winner);
       } catch (error) {
         console.error('❌ Error handling resignation:', error);
         socket.emit('error', { message: 'Failed to process resignation' });
@@ -794,11 +1026,9 @@ app.prepare().then(async () => {
         if (data.accept) {
           // Draw accepted
           game.gameStatus = 'finished';
-          game.result = {
-            winner: 'draw',
-            reason: 'draw_agreed',
-            endedAt: new Date()
-          };
+          game.result.winner = 'draw';
+          game.result.reason = 'draw_agreed';
+          game.endedAt = new Date();
           game.drawOffer = null;
           
           await game.save();
@@ -877,11 +1107,9 @@ app.prepare().then(async () => {
         // If game was active, end it
         if (game.gameStatus === 'active' || game.gameStatus === 'waiting') {
           game.gameStatus = 'finished';
-          game.result = {
-            winner: data.playerColor === 'white' ? 'black' : 'white',
-            reason: 'abandoned',
-            endedAt: new Date()
-          };
+          game.result.winner = data.playerColor === 'white' ? 'black' : 'white';
+          game.result.reason = 'abandoned';
+          game.endedAt = new Date();
         }
         
         await game.save();
@@ -913,6 +1141,126 @@ app.prepare().then(async () => {
       } catch (error) {
         console.error('❌ Error kicking player:', error);
         socket.emit('error', { message: 'Failed to kick player' });
+      }
+    });
+
+    // Handle rematch request
+    socket.on('request_rematch', async (data) => {
+      try {
+        console.log('🔄 Rematch requested:', data);
+        const game = await Game.findOne({ roomId: data.roomId });
+        
+        if (!game) {
+          socket.emit('error', { message: 'Game not found' });
+          return;
+        }
+
+        // Determine who requested
+        const requestingPlayer = game.players.white?.socketId === socket.id ? 'white' : 'black';
+        const requestingUsername = game.players[requestingPlayer]?.username;
+
+        // Initialize rematch request if not exists
+        if (!game.rematchRequest) {
+          game.rematchRequest = {
+            white: false,
+            black: false
+          };
+        }
+
+        // Mark player as requesting rematch
+        game.rematchRequest[requestingPlayer] = true;
+        await game.save();
+
+        // Notify the room about rematch request
+        io.to(data.roomId).emit('rematch_requested', {
+          from: requestingPlayer,
+          fromUsername: requestingUsername,
+          rematchRequest: game.rematchRequest
+        });
+
+        // If both players want rematch, start a new game
+        if (game.rematchRequest.white && game.rematchRequest.black) {
+          console.log('🎮 Both players want rematch, creating new game...');
+          
+          // Reset the game
+          const chess = new Chess();
+          
+          game.board = chess.fen();
+          game.currentPlayer = 'white';
+          game.gameStatus = 'active';
+          game.moves = [];
+          game.result = { winner: null, reason: null };
+          game.drawOffer = null;
+          game.rematchRequest = null;
+          game.startedAt = new Date();
+          game.endedAt = null;
+          
+          // Reset castling rights
+          game.castlingRights = {
+            white: { kingside: true, queenside: true },
+            black: { kingside: true, queenside: true }
+          };
+          
+          // Reset time control
+          if (game.timeControl && game.timeControl.initialTime) {
+            game.timeControl.whiteTime = game.timeControl.initialTime;
+            game.timeControl.blackTime = game.timeControl.initialTime;
+          }
+          
+          await game.save();
+
+          // Emit game reset to both players
+          io.to(data.roomId).emit('game_reset', {
+            game: game,
+            message: 'Rematch started!'
+          });
+
+          // Broadcast to lobby
+          io.emit('lobby_update', {
+            action: 'game_updated',
+            game: game
+          });
+
+          console.log('✅ Rematch started successfully');
+        } else {
+          console.log('✅ Rematch request sent, waiting for other player');
+        }
+      } catch (error) {
+        console.error('❌ Error handling rematch request:', error);
+        socket.emit('error', { message: 'Failed to process rematch request' });
+      }
+    });
+
+    // Handle cancel rematch
+    socket.on('cancel_rematch', async (data) => {
+      try {
+        console.log('❌ Rematch cancelled:', data);
+        const game = await Game.findOne({ roomId: data.roomId });
+        
+        if (!game) {
+          socket.emit('error', { message: 'Game not found' });
+          return;
+        }
+
+        // Determine who cancelled
+        const cancellingPlayer = game.players.white?.socketId === socket.id ? 'white' : 'black';
+
+        // Clear rematch request
+        if (game.rematchRequest) {
+          game.rematchRequest[cancellingPlayer] = false;
+          await game.save();
+        }
+
+        // Notify the room
+        io.to(data.roomId).emit('rematch_cancelled', {
+          from: cancellingPlayer,
+          rematchRequest: game.rematchRequest
+        });
+
+        console.log('✅ Rematch request cancelled');
+      } catch (error) {
+        console.error('❌ Error cancelling rematch:', error);
+        socket.emit('error', { message: 'Failed to cancel rematch' });
       }
     });
   });
