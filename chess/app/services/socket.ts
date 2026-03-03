@@ -195,6 +195,27 @@ class SocketService {
   declareTimeout(roomId: string, losingColor: 'white' | 'black') {
     this.emit('declare_timeout', { roomId, losingColor });
   }
+
+  promotePawn(roomId: string, from: any, to: any, promotion: string) {
+    // Support both {row, col} and string formats
+    let fromSquare, toSquare;
+    
+    if (typeof from === 'string' && typeof to === 'string') {
+      fromSquare = from;
+      toSquare = to;
+    } else {
+      // Convert {row, col} to algebraic notation
+      fromSquare = this.positionToSquare(from);
+      toSquare = this.positionToSquare(to);
+    }
+    
+    console.log('📡 Socket: Sending pawn promotion:', fromSquare, '->', toSquare, 'as', promotion);
+    this.emit('promote_pawn', { roomId, from: fromSquare, to: toSquare, promotion });
+  }
+
+  sendMessage(roomId: string, message: string) {
+    this.emit('chat_message', { roomId, message });
+  }
 }
 
 const socketService = new SocketService();

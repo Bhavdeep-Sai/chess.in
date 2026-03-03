@@ -20,8 +20,9 @@ interface Message {
 }
 
 interface PromotionData {
-  from: Position;
-  to: Position;
+  from: string | Position;
+  to: string | Position;
+  color?: 'white' | 'black';
 }
 
 interface GameBoardProps {
@@ -30,6 +31,8 @@ interface GameBoardProps {
   selectedSquare: Position | null;
   possibleMoves: [number, number][];
   captureMoves: [number, number][];
+  illegalMoves?: [number, number][];
+  illegalCaptures?: [number, number][];
   isMyTurn: boolean;
   timeLeft: { white: number; black: number };
   capturedPieces: CapturedPiecesType;
@@ -50,6 +53,8 @@ interface GameBoardProps {
   onSendMessage: (message: string) => void;
   onMoveAttempt?: (from: string, to: string) => void;
   roomId?: string;
+  gameStatus?: string;
+  replayControls?: React.ReactNode;
 }
 
 const GameBoard: React.FC<GameBoardProps> = ({ 
@@ -58,6 +63,8 @@ const GameBoard: React.FC<GameBoardProps> = ({
   selectedSquare,
   possibleMoves,
   captureMoves,
+  illegalMoves = [],
+  illegalCaptures = [],
   isMyTurn,
   timeLeft,
   capturedPieces,
@@ -77,7 +84,9 @@ const GameBoard: React.FC<GameBoardProps> = ({
   onResign,
   onSendMessage,
   onMoveAttempt,
-  roomId
+  roomId,
+  gameStatus = 'active',
+  replayControls
 }) => {
   const theme = useTheme();
 
@@ -91,7 +100,11 @@ const GameBoard: React.FC<GameBoardProps> = ({
   const isKingInCheck = (row: number, col: number): boolean => {
     if (!gameState?.board) return false;
     const piece = gameState.board[row][col];
-    return !!(piece && piece.type === 'king' && isInCheck && piece.color === playerColor);
+    // Highlight the king that is currently in check (current player's king)
+    if (!piece || piece.type !== 'king' || !isInCheck) return false;
+    // Check if this king's color matches the current player (who is in check)
+    const currentPlayerColor = gameState.currentPlayer;
+    return piece.color === currentPlayerColor;
   };
 
   const isSquareSelected = (row: number, col: number): boolean => {
@@ -104,6 +117,14 @@ const GameBoard: React.FC<GameBoardProps> = ({
 
   const isCaptureSquare = (row: number, col: number): boolean => {
     return captureMoves.some(([moveRow, moveCol]) => moveRow === row && moveCol === col);
+  };
+
+  const isIllegalMoveSquare = (row: number, col: number): boolean => {
+    return illegalMoves.some(([moveRow, moveCol]) => moveRow === row && moveCol === col);
+  };
+
+  const isIllegalCaptureSquare = (row: number, col: number): boolean => {
+    return illegalCaptures.some(([moveRow, moveCol]) => moveRow === row && moveCol === col);
   };
 
   const isLastMoveSquare = (row: number, col: number): boolean => {
@@ -215,14 +236,23 @@ const GameBoard: React.FC<GameBoardProps> = ({
             <div className="space-y-2">
               <button
                 onClick={onOfferDraw}
-                disabled={!!drawOffer}
-                className={`w-full ${drawOffer ? 'bg-gray-400 cursor-not-allowed' : theme.colors.button.primary} text-white py-3 rounded-lg transition-colors duration-200 font-semibold`}
+                disabled={!!drawOffer || gameStatus !== 'active'}
+                className={`w-full ${
+                  drawOffer || gameStatus !== 'active'
+                    ? 'bg-gray-400 cursor-not-allowed' 
+                    : theme.colors.button.primary
+                } text-white py-3 rounded-lg transition-colors duration-200 font-semibold`}
               >
                 {drawOffer ? 'Draw Offer Pending' : 'Offer Draw'}
               </button>
               <button
                 onClick={onResign}
-                className={`w-full ${theme.colors.button.danger} text-white py-3 rounded-lg transition-colors duration-200 font-semibold`}
+                disabled={gameStatus !== 'active'}
+                className={`w-full ${
+                  gameStatus !== 'active'
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : theme.colors.button.danger
+                } text-white py-3 rounded-lg transition-colors duration-200 font-semibold`}
               >
                 Resign
               </button>
@@ -234,7 +264,14 @@ const GameBoard: React.FC<GameBoardProps> = ({
         <div className="flex-1 flex flex-col justify-center items-center max-w-3xl">
           {/* Use react-chessboard if onMoveAttempt is provided, otherwise use custom board */}
           {onMoveAttempt && roomId ? (
-            <div className="w-full max-w-2xl">
+            <div className={`w-full max-w-2xl relative ${gameStatus !== 'active' ? 'opacity-75 pointer-events-none' : ''}`}>
+              {gameStatus !== 'active' && (
+                <div className="absolute inset-0 bg-gray-900 bg-opacity-20 z-10 rounded-lg flex items-center justify-center">
+                  <div className="text-white text-xl font-bold bg-black bg-opacity-50 px-6 py-3 rounded-lg">
+                    Game Ended
+                  </div>
+                </div>
+              )}
               <ReactChessboardWrapper
                 roomId={roomId}
                 playerColor={playerColor}
@@ -244,7 +281,14 @@ const GameBoard: React.FC<GameBoardProps> = ({
               />
             </div>
           ) : (
-            <div className="relative" style={{ padding: '30px', backgroundColor: '#eeeed2', boxShadow: '0 10px 40px rgba(0,0,0,0.3)' }}>
+            <div className={`relative ${gameStatus !== 'active' ? 'opacity-75' : ''}`} style={{ padding: '30px', backgroundColor: '#eeeed2', boxShadow: '0 10px 40px rgba(0,0,0,0.3)' }}>
+              {gameStatus !== 'active' && (
+                <div className="absolute inset-0 bg-gray-900 bg-opacity-30 z-10 rounded-lg flex items-center justify-center">
+                  <div className="text-white text-2xl font-bold bg-black bg-opacity-50 px-6 py-3 rounded-lg">
+                    Game Ended
+                  </div>
+                </div>
+              )}
               {/* Board Labels - Ranks (Numbers) */}
               <div className="absolute left-3 top-7 h-[640px] flex flex-col justify-around font-bold text-base" style={{ color: '#654321' }}>
                 {(playerColor === 'black' ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1]).map(num => (
@@ -281,6 +325,8 @@ const GameBoard: React.FC<GameBoardProps> = ({
                           isSelected={isSquareSelected(actualRow, actualCol)}
                           isValidMove={isValidMoveSquare(actualRow, actualCol)}
                           isCapture={isCaptureSquare(actualRow, actualCol)}
+                          isIllegalMove={isIllegalMoveSquare(actualRow, actualCol)}
+                          isIllegalCapture={isIllegalCaptureSquare(actualRow, actualCol)}
                           isLastMove={isLastMoveSquare(actualRow, actualCol)}
                           isCheck={isKingInCheck(actualRow, actualCol)}
                           isInvalidMove={isInvalidMoveSquare(actualRow, actualCol)}
@@ -304,6 +350,13 @@ const GameBoard: React.FC<GameBoardProps> = ({
             currentPlayer={gameState?.currentPlayer}
           />
           
+          {/* Move Navigator */}
+          {replayControls && (
+            <div>
+              {replayControls}
+            </div>
+          )}
+          
           <ChatBox
             messages={messages}
             onSendMessage={onSendMessage}
@@ -316,7 +369,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
       {/* Promotion Modal */}
       <PromotionModal
         isOpen={promotionData !== null}
-        playerColor={playerColor}
+        playerColor={promotionData?.color || playerColor || 'white'}
         onSelect={onPromotionSelect}
         onCancel={onPromotionCancel}
       />

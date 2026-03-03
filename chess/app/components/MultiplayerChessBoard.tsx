@@ -5,6 +5,9 @@ import RoomLobby from './RoomLobby';
 import GameBoard from './GameBoard';
 import ReactChessboardWrapper from './ReactChessboardWrapper';
 import Results from './Results';
+import GameOverBanner from './GameOverBanner';
+import MoveReplayControls from './MoveReplayControls';
+import ErrorBoundary from './ErrorBoundary';
 import socketService from '../services/socket';
 import { gamesApi } from '../services/api';
 import { getLegalMovesWithTypes } from '../utils/chess';
@@ -34,8 +37,9 @@ interface Message {
 }
 
 interface PromotionData {
-  from: Position;
-  to: Position;
+  from: string | Position;
+  to: string | Position;
+  color?: 'white' | 'black';
 }
 
 interface AlertConfig {
@@ -61,6 +65,8 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
   const [selectedSquare, setSelectedSquare] = useState<Position | null>(null);
   const [possibleMoves, setPossibleMoves] = useState<[number, number][]>([]);
   const [captureMoves, setCaptureMoves] = useState<[number, number][]>([]);
+  const [illegalMoves, setIllegalMoves] = useState<[number, number][]>([]);
+  const [illegalCaptures, setIllegalCaptures] = useState<[number, number][]>([]);
   const [isMyTurn, setIsMyTurn] = useState(false);
   const [gameStatus, setGameStatus] = useState<string>('waiting');
   const [timeLeft, setTimeLeft] = useState<{ white: number; black: number }>({ white: 0, black: 0 });
@@ -77,6 +83,8 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
   const [invalidMovePiece, setInvalidMovePiece] = useState<Position | null>(null);
   const [drawOffer, setDrawOffer] = useState<DrawOffer | null>(null);
   const [showDrawOfferDialog, setShowDrawOfferDialog] = useState(false);
+  const [rematchRequested, setRematchRequested] = useState(false);
+  const [opponentRematchRequested, setOpponentRematchRequested] = useState(false);
   const [alertConfig, setAlertConfig] = useState<AlertConfig>({ 
     isOpen: false, 
     title: '', 
@@ -84,6 +92,66 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     onConfirm: null, 
     type: 'info' 
   });
+
+  // 📜 MOVE REPLAY SYSTEM STATE (Production-Ready Architecture)
+  // moveHistory[0] = initial position (no moves made)
+  // moveHistory[1] = position after move 1
+  // moveHistory[n] = position after move n
+  // currentMoveIndex points to which position we're viewing
+  const [moveHistory, setMoveHistory] = useState<any[]>([]);
+  const [currentMoveIndex, setCurrentMoveIndex] = useState<number>(0);
+
+  // 🛠️ UTILITY: Deep clone board state to avoid mutation
+  const deepCloneBoard = useCallback((board: any) => {
+    if (!board) return null;
+    if (typeof board === 'string') return board; // FEN string
+    return JSON.parse(JSON.stringify(board)); // 2D array
+  }, []);
+
+  // 🛠️ UTILITY: Calculate captured pieces from moves
+  const calculateCapturedPieces = useCallback((moves: any[]) => {
+    const captured: CapturedPieces = { white: [], black: [] };
+
+    if (!moves || !Array.isArray(moves)) return captured;
+
+    moves.forEach(move => {
+      if (move.captured) {
+        const capturedBy = move.piece?.color || 'white';
+        captured[capturedBy].push(move.captured);
+      }
+    });
+
+    return captured;
+  }, []);
+
+  // 🛠️ UTILITY: Create board snapshot (Deep clone to prevent mutation)
+  const createBoardSnapshot = useCallback((currentGameState: GameState | null, moveNumber: number = 0) => {
+    if (!currentGameState) return null;
+    
+    // For initial position (moveNumber = 0), no last move
+    // For other positions, find the move at that index
+    const lastMoveData = moveNumber > 0 && currentGameState.moves && currentGameState.moves.length >= moveNumber
+      ? currentGameState.moves[moveNumber - 1]
+      : null;
+    
+    // Calculate captured pieces up to this move
+    const movesUpToNow = currentGameState.moves ? currentGameState.moves.slice(0, moveNumber) : [];
+    
+    return {
+      board: deepCloneBoard(currentGameState.board),
+      currentPlayer: currentGameState.currentPlayer,
+      castlingRights: JSON.parse(JSON.stringify(currentGameState.castlingRights || {})),
+      moves: [...movesUpToNow],
+      lastMove: lastMoveData,
+      capturedPieces: calculateCapturedPieces(movesUpToNow),
+      moveNumber: moveNumber,
+      timestamp: Date.now(),
+      // Preserve all game state properties
+      players: currentGameState.players,
+      gameStatus: currentGameState.gameStatus,
+      result: currentGameState.result
+    };
+  }, [deepCloneBoard, calculateCapturedPieces]);
 
   // Initialize socket connection
   useEffect(() => {
@@ -163,22 +231,6 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     };
   }, [isGuest, guestData, roomId, password]);
 
-  // Calculate captured pieces from moves
-  const calculateCapturedPieces = useCallback((moves: any[]) => {
-    const captured: CapturedPieces = { white: [], black: [] };
-
-    if (!moves || !Array.isArray(moves)) return captured;
-
-    moves.forEach(move => {
-      if (move.captured) {
-        const capturedBy = move.piece?.color || 'white';
-        captured[capturedBy].push(move.captured);
-      }
-    });
-
-    return captured;
-  }, []);
-
   // Update captured pieces when game state changes
   useEffect(() => {
     if (gameState?.moves) {
@@ -211,11 +263,22 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
       const whiteReady = gameData.players?.white?.isReady || false;
       const blackReady = gameData.players?.black?.isReady || false;
       setBothPlayersReady(!!(hasWhitePlayer && hasBlackPlayer && whiteReady && blackReady));
+      
+      // Initialize move history for loaded game
+      // Start with current position - history will build as new moves are made
+      if ((gameData.gameStatus === 'active' || gameData.gameStatus === 'finished')) {
+        const currentMoveCount = gameData.moves?.length || 0;
+        const snapshot = createBoardSnapshot(gameData, currentMoveCount);
+        if (snapshot) {
+          setMoveHistory([snapshot]);
+          setCurrentMoveIndex(0); // Index 0 = current position when loading
+        }
+      }
 
     } catch {
       showToast.error('Failed to load game state');
     }
-  }, [roomId, isGuest, guestData]);
+  }, [roomId, isGuest, guestData, createBoardSnapshot]);
 
   const handleLeaveGame = useCallback(() => {
     if (socketService.isSocketConnected() && roomId) {
@@ -245,17 +308,51 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
         white: data.game.players?.white,
         black: data.game.players?.black
       });
-      console.log('🎮 Game status:', data.game.gameStatus);
+      console.log('🎮 Game status from server:', data.game.gameStatus);
+      console.log('🎮 Current local gameStatus:', gameStatus);
       
       // Force update game state
       setGameState({ ...data.game });
+      
+      // Initialize move history if empty and game has started
+      if (data.game.gameStatus === 'active' || data.game.gameStatus === 'finished') {
+        setMoveHistory(prev => {
+          if (prev.length === 0) {
+            // Start with current position - history builds as new moves are made
+            const currentMoveCount = data.game.moves?.length || 0;
+            const snapshot = createBoardSnapshot(data.game, currentMoveCount);
+            if (snapshot) {
+              setCurrentMoveIndex(0); // Index 0 = current position when joining
+              return [snapshot];
+            }
+          }
+          return prev;
+        });
+      }
       
       // Update player color if provided
       if (data.playerColor !== null && data.playerColor !== undefined) {
         console.log('🎮 Setting playerColor to:', data.playerColor);
         setPlayerColor(data.playerColor);
       }
-      setGameStatus(data.game.gameStatus);
+      
+      // 🔒 CRITICAL: Only update gameStatus if not already finished
+      // Once game is finished (by resignation/checkmate/etc), don't revert to active
+      console.log('🎮 About to update gameStatus. Current:', gameStatus, '| From server:', data.game.gameStatus);
+      setGameStatus(prevStatus => {
+        // 🚨 NEVER revert from finished to any other status
+        if (prevStatus === 'finished') {
+          console.log('⚠️ Game already finished, BLOCKING status change from server');
+          return 'finished';
+        }
+        // 🚨 If result exists, force status to finished regardless of server data
+        if (data.game.result?.winner) {
+          console.log('⚠️ Result exists in server data, FORCING status to finished');
+          return 'finished';
+        }
+        console.log('✅ Updating gameStatus to:', data.game.gameStatus);
+        return data.game.gameStatus;
+      });
 
       if (playerColor && data.game?.players) {
         const isPlayerReady = playerColor === 'white' 
@@ -297,7 +394,7 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
       console.log('📨 move_made received:', data);
       setGameState(prev => {
         if (!prev) return null;
-        return {
+        const updatedState = {
           ...prev,
           board: data.fen || data.board, // Server sends 'fen', fallback to 'board'
           currentPlayer: data.currentPlayer,
@@ -305,13 +402,19 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
           gameStatus: data.gameStatus,
           result: data.result
         };
+        
+        // Move index will be updated by the move history useEffect
+        // This ensures the history and index stay in sync
+        
+        return updatedState;
       });
 
       setSelectedSquare(null);
       setPossibleMoves([]);
       setCaptureMoves([]);
       setIsMyTurn(data.currentPlayer === playerColor);
-      setIsInCheck(data.isCheck && data.currentPlayer === playerColor);
+      // Set check status regardless of whose turn it is - we want to show the highlighted king
+      setIsInCheck(data.isCheck);
       
       if (data.move) {
         setLastMove(data.move);
@@ -423,27 +526,50 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
 
     const handleGameEnded = (data: any) => {
       console.log('🏁 Game ended event received:', data);
-      setGameStatus('finished');
+      console.log('🏆 Winner from data:', data.winner);
+      console.log('📋 Reason from data:', data.reason);
+      console.log('📋 Result from data:', data.result);
+      console.log('🎮 Game object:', data.game);
+      
+      console.log('🔴 SETTING GAME STATUS TO FINISHED - FORCED');
+      // 🚨 CRITICAL: Force status to finished - this MUST stick
+      setGameStatus(() => {
+        console.log('🔴 INSIDE setGameStatus callback - returning FINISHED');
+        return 'finished';
+      });
+      console.log('🔴 GAME STATUS SET TO FINISHED');
       
       setGameState(prev => {
         if (!prev) {
-          console.log('⚠️ No game state when game ended, loading...');
-          // If we don't have game state yet, load it and create a minimal state for now
-          loadGameState();
-          // Return minimal state to prevent null issues
+          console.log('⚠️ No game state when game ended');
+          // If we don't have game state yet, create minimal state with result data
+          const resultData = data.result || {
+            winner: data.winner,
+            reason: data.reason,
+            method: data.reason
+          };
+          console.log('✅ Created new state with result:', resultData);
           return {
             gameStatus: 'finished',
-            result: data.result,
+            result: resultData,
             players: data.game?.players || {},
             board: data.game?.board || null,
             currentPlayer: data.game?.currentPlayer || 'white',
             moves: data.game?.moves || []
           } as GameState;
         }
+        
+        const resultData = data.result || {
+          winner: data.winner,
+          reason: data.reason,
+          method: data.reason
+        };
+        console.log('✅ Updating game state with result:', resultData);
+        
         return {
           ...prev,
           gameStatus: 'finished',
-          result: data.result
+          result: resultData
         };
       });
     };
@@ -498,11 +624,21 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     };
 
     const handleDrawOffered = (data: any) => {
+      console.log('🤝 Draw offer received from opponent:', data);
       setDrawOffer(data);
       setShowDrawOfferDialog(true);
+      showToast.info('Your opponent has offered a draw');
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        username: 'System',
+        message: `${data.fromUsername || data.from} has offered a draw`,
+        timestamp: new Date(),
+        type: 'system'
+      }]);
     };
 
     const handleDrawOfferSent = (data: any) => {
+      console.log('🤝 Draw offer sent confirmation:', data);
       setDrawOffer(data);
       setMessages(prev => [...prev, {
         id: Date.now(),
@@ -514,8 +650,10 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     };
 
     const handleDrawDeclined = () => {
+      console.log('🤝 Draw offer declined by opponent');
       setDrawOffer(null);
       setShowDrawOfferDialog(false);
+      showToast.info('Draw offer was declined');
       setMessages(prev => [...prev, {
         id: Date.now(),
         username: 'System',
@@ -547,6 +685,51 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
       }, 100);
     };
 
+    const handleRematchRequested = (data: any) => {
+      console.log('🔄 Rematch requested by opponent:', data);
+      const isMyRequest = (playerColor === data.from);
+      
+      if (!isMyRequest) {
+        setOpponentRematchRequested(true);
+        showToast.info(`${data.fromUsername} wants a rematch!`);
+      }
+    };
+
+    const handleRematchCancelled = (data: any) => {
+      console.log('❌ Rematch cancelled:', data);
+      const isMyCancel = (playerColor === data.from);
+      
+      if (!isMyCancel) {
+        setOpponentRematchRequested(false);
+        showToast.info('Opponent cancelled rematch request');
+      }
+    };
+
+    const handleGameReset = (data: any) => {
+      console.log('🎮 Game reset for rematch:', data);
+      showToast.success('Rematch started!');
+      
+      // Reset all game state
+      setRematchRequested(false);
+      setOpponentRematchRequested(false);
+      setGameStatus('active');
+      setDrawOffer(null);
+      setShowDrawOfferDialog(false);
+      setSelectedSquare(null);
+      setPossibleMoves([]);
+      setCaptureMoves([]);
+      setIllegalMoves([]);
+      setIllegalCaptures([]);
+      setInvalidMovePiece(null);
+      
+      // CRITICAL: Reset move history for new game
+      setMoveHistory([]);
+      setCurrentMoveIndex(0);
+      
+      // Load the new game state
+      loadGameState();
+    };
+
     socketService.on('game_state', handleGameState);
     socketService.on('move_made', handleMoveMade);
     socketService.on('promotion_required', handlePromotionRequired);
@@ -561,6 +744,9 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     socketService.on('draw_offered', handleDrawOffered);
     socketService.on('draw_offer_sent', handleDrawOfferSent);
     socketService.on('draw_declined', handleDrawDeclined);
+    socketService.on('rematch_requested', handleRematchRequested);
+    socketService.on('rematch_cancelled', handleRematchCancelled);
+    socketService.on('game_reset', handleGameReset);
     socketService.on('room_closed', handleRoomClosed);
     socketService.on('kicked_from_room', handleKickedFromRoom);
 
@@ -580,6 +766,9 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
         socketService.off('draw_offered', handleDrawOffered);
         socketService.off('draw_offer_sent', handleDrawOfferSent);
         socketService.off('draw_declined', handleDrawDeclined);
+        socketService.off('rematch_requested', handleRematchRequested);
+        socketService.off('rematch_cancelled', handleRematchCancelled);
+        socketService.off('game_reset', handleGameReset);
         socketService.off('room_closed', handleRoomClosed);
         socketService.off('kicked_from_room', handleKickedFromRoom);
       }
@@ -637,8 +826,31 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     }
   }, [playerColor, gameState, isGuest, guestData]);
 
+  // 🚨 EMERGENCY STATUS FIX - If result exists but status is wrong, force correction
+  useEffect(() => {
+    if (gameState?.result?.winner && gameStatus !== 'finished') {
+      console.error('⚠️⚠️⚠️ EMERGENCY FIX TRIGGERED: Result exists but status not finished!');
+      console.error('Forcing gameStatus to finished...');
+      setGameStatus('finished');
+    }
+  }, [gameState?.result?.winner, gameStatus]);
+
   const handleSquareClick = useCallback((row: number, col: number) => {
-    if (!isMyTurn || gameStatus !== 'active') {
+    // Prevent moves if viewing past positions (not at latest move)
+    const isAtLatest = currentMoveIndex === moveHistory.length - 1;
+    if (!isAtLatest) {
+      showToast.info('Return to latest move to play');
+      return;
+    }
+
+    // Prevent all moves if game is not active
+    if (gameStatus !== 'active') {
+      console.log('⛔ Board locked - game status:', gameStatus);
+      return;
+    }
+
+    if (!isMyTurn) {
+      console.log('⛔ Not your turn');
       return;
     }
 
@@ -647,11 +859,52 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     if (!selectedSquare) {
       if (piece && piece.color === playerColor) {
         setSelectedSquare({ row, col });
-        const movesWithTypes = getLegalMovesWithTypes(gameState!.board, row, col, piece, gameState!.castlingRights);
-        const regularMoves = movesWithTypes.filter(move => !move.isCapture).map(move => [move.row, move.col] as [number, number]);
-        const captures = movesWithTypes.filter(move => move.isCapture).map(move => [move.row, move.col] as [number, number]);
-        setPossibleMoves(regularMoves);
-        setCaptureMoves(captures);
+        
+        // Import functions we need
+        const { getLegalMoves, getPossibleMoves } = require('@/lib/utils/chessLogic');
+        
+        // Get ALL possible moves (including illegal ones)
+        const allPossibleMoves = getPossibleMoves(gameState!.board, row, col, piece, gameState!.castlingRights);
+        
+        // Get LEGAL moves (those that don't leave king in check)
+        const legalMoves = getLegalMoves(gameState!.board, row, col, piece, gameState!.castlingRights);
+        
+        // Separate into legal and illegal moves
+        const legalMovesSet = new Set(legalMoves.map(([r, c]) => `${r},${c}`));
+        const illegal: [number, number][] = [];
+        const illegalCaps: [number, number][] = [];
+        const legal: [number, number][] = [];
+        const legalCaps: [number, number][] = [];
+        
+        allPossibleMoves.forEach(([moveRow, moveCol]) => {
+          const isLegal = legalMovesSet.has(`${moveRow},${moveCol}`);
+          const isCapture = gameState!.board[moveRow][moveCol] !== null;
+          
+          if (isLegal) {
+            if (isCapture) {
+              legalCaps.push([moveRow, moveCol]);
+            } else {
+              legal.push([moveRow, moveCol]);
+            }
+          } else {
+            if (isCapture) {
+              illegalCaps.push([moveRow, moveCol]);
+            } else {
+              illegal.push([moveRow, moveCol]);
+            }
+          }
+        });
+        
+        setPossibleMoves(legal);
+        setCaptureMoves(legalCaps);
+        setIllegalMoves(illegal);
+        setIllegalCaptures(illegalCaps);
+        
+        // Show feedback if no legal moves during check
+        if (isInCheck && legal.length === 0 && legalCaps.length === 0) {
+          console.log('⚠️ No legal moves available - piece cannot help resolve check');
+          showToast.info('This piece cannot help resolve the check');
+        }
       }
       return;
     }
@@ -662,16 +915,71 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
       setSelectedSquare(null);
       setPossibleMoves([]);
       setCaptureMoves([]);
+      setIllegalMoves([]);
+      setIllegalCaptures([]);
       return;
     }
 
     if (piece && piece.color === playerColor) {
       setSelectedSquare({ row, col });
-      const movesWithTypes = getLegalMovesWithTypes(gameState!.board, row, col, piece, gameState!.castlingRights);
-      const regularMoves = movesWithTypes.filter(move => !move.isCapture).map(move => [move.row, move.col] as [number, number]);
-      const captures = movesWithTypes.filter(move => move.isCapture).map(move => [move.row, move.col] as [number, number]);
-      setPossibleMoves(regularMoves);
-      setCaptureMoves(captures);
+      
+      // Import functions we need
+      const { getLegalMoves, getPossibleMoves } = require('@/lib/utils/chessLogic');
+      
+      // Get ALL possible moves (including illegal ones)
+      const allPossibleMoves = getPossibleMoves(gameState!.board, row, col, piece, gameState!.castlingRights);
+      
+      // Get LEGAL moves (those that don't leave king in check)
+      const legalMoves = getLegalMoves(gameState!.board, row, col, piece, gameState!.castlingRights);
+      
+      // Separate into legal and illegal moves
+      const legalMovesSet = new Set(legalMoves.map(([r, c]) => `${r},${c}`));
+      const illegal: [number, number][] = [];
+      const illegalCaps: [number, number][] = [];
+      const legal: [number, number][] = [];
+      const legalCaps: [number, number][] = [];
+      
+      allPossibleMoves.forEach(([moveRow, moveCol]) => {
+        const isLegal = legalMovesSet.has(`${moveRow},${moveCol}`);
+        const isCapture = gameState!.board[moveRow][moveCol] !== null;
+        
+        if (isLegal) {
+          if (isCapture) {
+            legalCaps.push([moveRow, moveCol]);
+          } else {
+            legal.push([moveRow, moveCol]);
+          }
+        } else {
+          if (isCapture) {
+            illegalCaps.push([moveRow, moveCol]);
+          } else {
+            illegal.push([moveRow, moveCol]);
+          }
+        }
+      });
+      
+      setPossibleMoves(legal);
+      setCaptureMoves(legalCaps);
+      setIllegalMoves(illegal);
+      setIllegalCaptures(illegalCaps);
+      return;
+    }
+
+    // Check if this is a legal move before executing
+    const isLegalMove = possibleMoves.some(([r, c]) => r === row && c === col) || 
+                        captureMoves.some(([r, c]) => r === row && c === col);
+    
+    if (!isLegalMove) {
+      // Invalid move - show feedback and reset
+      console.log('❌ Illegal move - does not resolve check or is invalid');
+      showToast.error('Invalid move! This move would leave your king in check.');
+      setInvalidMovePiece({ row: fromRow, col: fromCol });
+      setTimeout(() => setInvalidMovePiece(null), 500);
+      setSelectedSquare(null);
+      setPossibleMoves([]);
+      setCaptureMoves([]);
+      setIllegalMoves([]);
+      setIllegalCaptures([]);
       return;
     }
 
@@ -679,7 +987,7 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     setLastMoveTime(moveTime);
 
     socketService.makeMove(roomId, { row: fromRow, col: fromCol }, { row, col }, moveStartTime);
-  }, [isMyTurn, gameStatus, gameState, selectedSquare, playerColor, roomId, moveStartTime]);
+  }, [isMyTurn, gameStatus, gameState, selectedSquare, playerColor, roomId, moveStartTime, isInCheck, possibleMoves, captureMoves, showToast, currentMoveIndex, moveHistory.length]);
 
   const handleMoveAttempt = useCallback((from: string, to: string) => {
     console.log('🎯 Move attempt:', from, '->', to);
@@ -758,28 +1066,215 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
     setIsReady(true);
   };
 
+  // 📜 MOVE REPLAY NAVIGATION HANDLERS (Chess.com/Lichess Style)
+  const handleBackward = useCallback(() => {
+    // Bounds check: can't go before initial position
+    if (currentMoveIndex <= 0 || moveHistory.length === 0) {
+      console.log('⬅️ Already at initial position');
+      return;
+    }
+    
+    const newIndex = currentMoveIndex - 1;
+    console.log(`⬅️ Navigating backward: ${currentMoveIndex} → ${newIndex}`);
+    
+    setCurrentMoveIndex(newIndex);
+    
+    // Clear selections when navigating
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+    setCaptureMoves([]);
+    setIllegalMoves([]);
+    setIllegalCaptures([]);
+  }, [currentMoveIndex, moveHistory.length]);
+
+  const handleForward = useCallback(() => {
+    const maxIndex = moveHistory.length - 1;
+    
+    // Bounds check: can't go beyond latest move
+    if (currentMoveIndex >= maxIndex || moveHistory.length === 0) {
+      console.log('➡️ Already at latest position');
+      return;
+    }
+    
+    const newIndex = currentMoveIndex + 1;
+    console.log(`➡️ Navigating forward: ${currentMoveIndex} → ${newIndex}`);
+    
+    setCurrentMoveIndex(newIndex);
+    
+    // Clear selections when navigating
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+    setCaptureMoves([]);
+    setIllegalMoves([]);
+    setIllegalCaptures([]);
+  }, [currentMoveIndex, moveHistory.length]);
+
+  const handleExitReplay = useCallback(() => {
+    console.log('⏭️ Returning to latest move');
+    
+    if (moveHistory.length === 0) return;
+    
+    const latestIndex = moveHistory.length - 1;
+    setCurrentMoveIndex(latestIndex);
+    
+    // Clear selections
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+    setCaptureMoves([]);
+    setIllegalMoves([]);
+    setIllegalCaptures([]);
+  }, [moveHistory.length]);
+
+  // 📜 Initialize move history with initial position
+  useEffect(() => {
+    if (!gameState) return;
+    
+    // Only initialize if history is empty
+    if (moveHistory.length === 0) {
+      console.log('📚 Initializing move history with initial position');
+      const initialSnapshot = createBoardSnapshot(gameState, 0);
+      if (initialSnapshot) {
+        setMoveHistory([initialSnapshot]);
+        setCurrentMoveIndex(0);
+      }
+    }
+  }, [gameState, moveHistory.length, createBoardSnapshot]);
+
+  // 📜 Update move history when new moves are made
+  useEffect(() => {
+    if (!gameState || !gameState.moves) return;
+    
+    const currentMoveCount = gameState.moves.length;
+    const historyMoveCount = moveHistory.length - 1; // -1 because index 0 is initial position
+    
+    // New move detected
+    if (currentMoveCount > historyMoveCount) {
+      console.log(`📚 New move detected: ${historyMoveCount} → ${currentMoveCount}`);
+      
+      const snapshot = createBoardSnapshot(gameState, currentMoveCount);
+      if (snapshot) {
+        setMoveHistory(prev => [...prev, snapshot]);
+        
+        // ALWAYS move to latest when new moves come in (follow the game in real-time)
+        // Only stay at current position if user is actively reviewing (not at latest before this move)
+        const wasAtLatest = currentMoveIndex === moveHistory.length - 1;
+        if (wasAtLatest) {
+          setCurrentMoveIndex(prev => prev + 1);
+        }
+      }
+    }
+  }, [gameState?.moves?.length, moveHistory.length, createBoardSnapshot, currentMoveIndex]);
+
+  // ⌨️ KEYBOARD SHORTCUTS for replay navigation
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      // Only work if there are moves to navigate
+      if (moveHistory.length === 0) return;
+      
+      // Don't interfere with input fields
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleBackward();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleForward();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleExitReplay();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, [handleBackward, handleForward, handleExitReplay, moveHistory.length]);
+
   const handleResign = () => {
+    // 🔒 Prevent resign if game already ended
+    if (gameStatus !== 'active') {
+      console.log('⛔ Cannot resign - game already ended');
+      showToast.error('Game has already ended');
+      return;
+    }
+
     setAlertConfig({
       isOpen: true,
-      title: 'Resign Game',
-      message: 'Are you sure you want to resign?',
+      title: '🏳️ Resign Game',
+      message: 'Are you sure you want to resign? Your opponent will be declared the winner.',
       type: 'warning',
       onConfirm: () => {
+        console.log('✅ Player confirmed resignation');
+        console.log('📤 Sending resign event to server');
+        
+        // 🔴 CRITICAL: Immediately set status to 'finished' locally with callback
+        // Don't wait for server response - prevents race conditions
+        console.log('🔴 PRE-EMPTIVELY setting gameStatus to finished');
+        setGameStatus(() => {
+          console.log('🔴 INSIDE handleResign setGameStatus - returning FINISHED');
+          return 'finished';
+        });
+        
+        // Send resign to server
         socketService.resign(roomId);
+        
         setAlertConfig(prev => ({ ...prev, isOpen: false }));
+        
+        // Server will send back game_ended event with final result
+        console.log('✅ Resign sent, waiting for server confirmation');
       },
       showCancel: true
     });
   };
 
   const handleOfferDraw = () => {
+    // 🔒 Prevent draw offer if game already ended
+    if (gameStatus !== 'active') {
+      console.log('⛔ Cannot offer draw - game already ended');
+      showToast.error('Game has already ended');
+      return;
+    }
+
+    // Prevent multiple draw offers
+    if (drawOffer) {
+      console.log('⛔ Draw offer already pending');
+      showToast.info('Draw offer already pending');
+      return;
+    }
+
+    console.log('🤝 Sending draw offer');
     socketService.emit('offer_draw', { roomId });
+    showToast.success('Draw offer sent to opponent');
   };
 
   const handleRespondToDraw = (accept: boolean) => {
+    console.log(`🤝 Responding to draw offer: ${accept ? 'ACCEPT' : 'DECLINE'}`);
     socketService.emit('respond_draw', { roomId, accept });
     setShowDrawOfferDialog(false);
-    setDrawOffer(null);
+    
+    if (accept) {
+      showToast.success('Draw accepted - Game ended');
+      // Game state will be updated by server response
+    } else {
+      showToast.info('Draw offer declined');
+      setDrawOffer(null);
+    }
+  };
+
+  const handleRequestRematch = () => {
+    console.log('🔄 Requesting rematch');
+    if (!rematchRequested) {
+      socketService.emit('request_rematch', { roomId });
+      setRematchRequested(true);
+      showToast.success('Rematch requested!');
+    } else {
+      // Cancel rematch
+      socketService.emit('cancel_rematch', { roomId });
+      setRematchRequested(false);
+      showToast.info('Rematch request cancelled');
+    }
   };
 
   const handleSendMessage = (message: string) => {
@@ -788,19 +1283,35 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
 
   const handlePromotionSelect = (promotion: string) => {
     if (promotionData) {
+      console.log('🎯 Player selected promotion:', promotion, 'for move', promotionData.from, '->', promotionData.to);
       socketService.promotePawn(roomId, promotionData.from, promotionData.to, promotion);
       setPromotionData(null);
     }
   };
 
   const handlePromotionCancel = () => {
+    console.log('❌ Player cancelled promotion');
+    if (promotionData) {
+      socketService.emit('cancel_promotion', { roomId });
+    }
     setPromotionData(null);
   };
 
-  // If game is finished but no gameState, show a minimal loading state but continue to render
+  // 🛡️ CRITICAL: Render state validation and debugging
   const hasValidGameState = gameState !== null;
   
+  // 🔍 Comprehensive state debugging
+  console.log('🔍 === RENDER CYCLE DEBUG START ===');
+  console.log('🎮 gameStatus:', gameStatus);
+  console.log('📊 hasValidGameState:', hasValidGameState);
+  console.log('📦 gameState:', gameState ? 'exists' : 'null');
+  console.log('🏆 result:', gameState?.result);
+  console.log('📜 moveHistory length:', moveHistory.length);
+  console.log('🔢 currentMoveIndex:', currentMoveIndex);
+  console.log('🔍 === RENDER CYCLE DEBUG END ===');
+  
   if (!hasValidGameState && gameStatus !== 'finished') {
+    console.log('⏳ Showing loading state (no game state)');
     return (
       <div className="flex justify-center items-center min-h-screen bg-gray-50 dark:bg-gray-900">
         <div className="text-center">
@@ -814,9 +1325,103 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
   const showLobby = gameStatus === 'waiting' && !bothPlayersReady;
   const showGame = (gameStatus === 'active' || gameStatus === 'finished' || (gameStatus === 'waiting' && bothPlayersReady));
   const showResults = gameStatus === 'finished';
+  
+  // 🚨 CRITICAL FIX: Show banner if result exists, regardless of gameStatus race condition
+  // This handles case where result is set but gameStatus hasn't updated yet
+  const showGameOverBanner = (gameStatus === 'finished' && gameState?.result) || 
+                             (gameState?.result?.winner && gameState?.result?.reason);
+  
+  console.log('🎮 Render flags:', {
+    showLobby,
+    showGame,
+    showResults,
+    showGameOverBanner,
+    gameStatus,
+    hasResult: !!gameState?.result,
+    resultWinner: gameState?.result?.winner,
+    resultReason: gameState?.result?.reason
+  });
+  
+  // 📜 PRODUCTION-READY BOARD STATE DETERMINATION
+  // CRITICAL: Board must NEVER be null or undefined
+  // Always use a valid snapshot from moveHistory
+  const getDisplayState = () => {
+    // Safety: Ensure moveHistory has data
+    if (moveHistory.length === 0) {
+      console.warn('⚠️ No move history available, using current game state');
+      return gameState;
+    }
+    
+    // Safety: Ensure currentMoveIndex is within bounds
+    const safeIndex = Math.max(0, Math.min(currentMoveIndex, moveHistory.length - 1));
+    
+    // Get the snapshot at current index
+    const snapshot = moveHistory[safeIndex];
+    
+    if (!snapshot) {
+      console.error('❌ Snapshot is null at index', safeIndex);
+      return gameState;
+    }
+    
+    // Merge snapshot with current game state to preserve all properties
+    return {
+      ...gameState,
+      board: snapshot.board,
+      currentPlayer: snapshot.currentPlayer,
+      castlingRights: snapshot.castlingRights,
+      moves: snapshot.moves || []
+    };
+  };
+  
+  const displayGameState = getDisplayState();
+  
+  // 🛡️ CRITICAL: Ensure we ALWAYS have a valid game state for rendering
+  // Multiple fallback layers prevent blank screen on state updates
+  const safeDisplayGameState = displayGameState || gameState || {
+    board: Array(8).fill(null).map(() => Array(8).fill(null)),
+    currentPlayer: 'white' as const,
+    castlingRights: { white: { kingSide: false, queenSide: false }, black: { kingSide: false, queenSide: false } },
+    moves: [],
+    gameStatus: gameStatus,
+    players: {},
+    result: gameState?.result
+  };
+  
+  console.log('🛡️ Safe display state prepared:', {
+    hasDisplayState: !!displayGameState,
+    hasGameState: !!gameState,
+    hasFallback: !!safeDisplayGameState,
+    board: safeDisplayGameState.board ? 'exists' : 'null'
+  });
+  
+  // Get last move and captured pieces from current snapshot
+  const getCurrentSnapshot = () => {
+    if (moveHistory.length === 0) return null;
+    const safeIndex = Math.max(0, Math.min(currentMoveIndex, moveHistory.length - 1));
+    return moveHistory[safeIndex];
+  };
+  
+  const currentSnapshot = getCurrentSnapshot();
+  const displayLastMove = currentSnapshot?.lastMove || null;
+  const displayCapturedPieces = currentSnapshot?.capturedPieces || capturedPieces;
+
+  // 🛡️ FINAL RENDER GUARD - Log what will be rendered
+  console.log('🚀 === FINAL RENDER DECISION ===');
+  console.log('showLobby:', showLobby);
+  console.log('showGame:', showGame);
+  console.log('showGameOverBanner:', showGameOverBanner);
+  console.log('safeDisplayGameState valid:', !!safeDisplayGameState?.board);
+  console.log('🚀 === END RENDER DECISION ===');
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors duration-200 overflow-hidden">
+      {/* Visual indicator for finished games - helps debug */}
+      {gameStatus === 'finished' && (
+        <div className="fixed top-4 right-4 z-50 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg">
+          🏁 Game Finished
+        </div>
+      )}
+      
       <CustomAlert
         isOpen={alertConfig.isOpen}
         onClose={() => setAlertConfig(prev => ({ ...prev, isOpen: false }))}
@@ -844,62 +1449,71 @@ const MultiplayerChessBoard: React.FC<MultiplayerChessBoardProps> = ({
 
       {showGame && (
         <>
-          <GameBoard
-            gameState={gameState}
-            playerColor={playerColor}
-            selectedSquare={selectedSquare}
-            possibleMoves={possibleMoves}
-            captureMoves={captureMoves}
-            isMyTurn={isMyTurn}
-            timeLeft={timeLeft}
-            capturedPieces={capturedPieces}
-            lastMove={lastMove}
-            invalidMovePiece={invalidMovePiece}
-            isInCheck={isInCheck}
-            promotionData={promotionData}
-            drawOffer={drawOffer}
-            showDrawOfferDialog={showDrawOfferDialog}
-            messages={messages}
-            currentUsername={getCurrentUsername()}
-            onSquareClick={handleSquareClick}
-            onPromotionSelect={handlePromotionSelect}
-            onPromotionCancel={handlePromotionCancel}
-            onOfferDraw={handleOfferDraw}
-            onRespondToDraw={handleRespondToDraw}
-            onResign={handleResign}
-            onSendMessage={handleSendMessage}
-            onMoveAttempt={handleMoveAttempt}
-            roomId={roomId}
-          />
+          {console.log('✅ Rendering game section. showGameOverBanner:', showGameOverBanner)}
           
-          {showResults && gameState && (
-            <div className="max-w-7xl mx-auto px-4 py-6">
-              <Results
-                gameState={gameState}
-                playerColor={playerColor}
-                currentUsername={getCurrentUsername()}
-                onPlayAgain={() => {
-                  window.location.href = '/game-lobby';
-                }}
-                onLeaveGame={handleLeaveGame}
-              />
-            </div>
+          {/* Game Over Banner Overlay - Shows when game finishes */}
+          {showGameOverBanner && (
+            <GameOverBanner
+              winner={gameState?.result?.winner || 'white'}
+              reason={gameState?.result?.reason || 'resignation'}
+              playerColor={playerColor}
+              whiteUsername={gameState?.players?.white?.username || 'White'}
+              blackUsername={gameState?.players?.black?.username || 'Black'}
+              onPlayAgain={handleRequestRematch}
+              onReturnToLobby={() => window.location.href = '/game-lobby'}
+              rematchRequested={rematchRequested}
+              opponentRematchRequested={opponentRematchRequested}
+              onCancelRematch={handleRequestRematch}
+            />
           )}
-          
-          {showResults && !gameState && (
-            <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900 p-4">
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-8 max-w-md w-full text-center">
-                <h2 className="text-3xl font-bold text-gray-800 dark:text-white mb-4">Game Ended</h2>
-                <p className="text-gray-600 dark:text-gray-400 mb-6">The game has ended</p>
-                <button
-                  onClick={() => window.location.href = '/game-lobby'}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200"
-                >
-                  Return to Lobby
-                </button>
-              </div>
-            </div>
-          )}
+
+          {console.log('🎯 About to render GameBoard')}
+          {/* CRITICAL: Always render GameBoard when game is shown - never conditionally hide it */}
+          {/* Wrapped in ErrorBoundary to catch any runtime errors */}
+          <ErrorBoundary>
+            <GameBoard
+              gameState={safeDisplayGameState}
+              playerColor={playerColor}
+              selectedSquare={selectedSquare}
+              possibleMoves={possibleMoves}
+              captureMoves={captureMoves}
+              illegalMoves={illegalMoves}
+              illegalCaptures={illegalCaptures}
+              isMyTurn={isMyTurn}
+              timeLeft={timeLeft}
+              capturedPieces={displayCapturedPieces}
+              lastMove={displayLastMove}
+              invalidMovePiece={invalidMovePiece}
+              isInCheck={isInCheck}
+              promotionData={promotionData}
+              drawOffer={drawOffer}
+              showDrawOfferDialog={showDrawOfferDialog}
+              messages={messages}
+              currentUsername={getCurrentUsername()}
+              onSquareClick={handleSquareClick}
+              onPromotionSelect={handlePromotionSelect}
+              onPromotionCancel={handlePromotionCancel}
+              onOfferDraw={handleOfferDraw}
+              onRespondToDraw={handleRespondToDraw}
+              onResign={handleResign}
+              onSendMessage={handleSendMessage}
+              onMoveAttempt={handleMoveAttempt}
+              roomId={roomId}
+              gameStatus={gameStatus}
+              replayControls={
+                <MoveReplayControls
+                  currentMoveIndex={currentMoveIndex}
+                  totalMoves={moveHistory.length > 0 ? moveHistory.length - 1 : 0}
+                  onBackward={handleBackward}
+                  onForward={handleForward}
+                  onExitReplay={handleExitReplay}
+                  disabled={gameStatus !== 'active' && gameStatus !== 'finished'}
+                  currentMoveNumber={currentSnapshot?.moveNumber ?? 0}
+                  totalGameMoves={gameState?.moves?.length ?? 0}
+                />
+              }
+            />
+          </ErrorBoundary>
         </>
       )}
     </div>
